@@ -1,0 +1,302 @@
+Parameters:
+  Input:
+    Type: String
+    Description: Enter the use-case name here
+
+  Network:
+    Type: String
+    Description: Enter the first two network CIDR octets (e.g 192.168)
+    Default: 10.0
+    AllowedValues:
+    - 10.0
+    - 192.168
+    - 172.16
+
+  BastionPrivateKey:
+    Type: AWS::EC2::KeyPair::KeyName
+
+  LatestAmiId:
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+  NeedNAT:
+    Type: String
+    Description: Stack only creates NAT if set to true
+    Default: False
+    AllowedValues:
+    - True
+    - False
+
+  PrimaryVPC:
+    Type: String
+    Description: Stack only creates TGW if set to true
+    Default: False
+    AllowedValues:
+    - True
+    - False
+
+  CrossVPCCIDR:
+    Type: String
+    Description: Enter the CIDR of the cross VPC for TGW route
+
+  PrimaryTGW:
+    Type: String
+    Description: Enter the TGW ID if this stack is for Secondary VPC
+
+Conditions:
+  NeedNAT:
+    !Equals [true, !Ref NeedNAT]
+  PrimaryVPC:
+    !Equals [true, !Ref PrimaryVPC]
+  SecondaryVPC:
+    !Equals [false, !Ref PrimaryVPC]
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: !Sub ${Network}.0.0/16
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-VPC
+      
+  InternetGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-IGW
+      
+  VPCAttach:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGW
+      VpcId: !Ref VPC
+        
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Sub ${Network}.0.0/24
+      AvailabilityZone: !Sub ${AWS::Region}a
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-PubSubnet1
+        
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Sub ${Network}.1.0/24
+      AvailabilityZone: !Sub ${AWS::Region}b
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-PubSubnet2
+
+  EIP:
+    Condition: NeedNAT
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-EIP     
+
+  NATGW:
+    Condition: NeedNAT
+    DependsOn: 
+      - VPCAttach
+      - EIP
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId:
+        Fn::GetAtt:
+          - EIP
+          - AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-NATGW
+
+  PublicRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-PubRT
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRT
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGW
+
+  PublicSubnetRTAssn1:
+   Type: AWS::EC2::SubnetRouteTableAssociation
+   Properties:
+     RouteTableId: !Ref PublicRT
+     SubnetId: !Ref PublicSubnet1
+
+  PublicSubnetRTAssn2:
+   Type: AWS::EC2::SubnetRouteTableAssociation
+   Properties:
+     RouteTableId: !Ref PublicRT
+     SubnetId: !Ref PublicSubnet2
+        
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Sub ${Network}.2.0/24
+      AvailabilityZone: !Sub ${AWS::Region}a
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-PrivSubnet1
+        
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      CidrBlock: !Sub ${Network}.3.0/24
+      AvailabilityZone: !Sub ${AWS::Region}b
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-PrivSubnet2
+
+  PrivateRT:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-PrivRT
+
+  PrivateRoute:
+    Condition: NeedNAT
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRT
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGW
+
+  PrivateSubnetRTAssn1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRT
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnetRTAssn2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRT
+      SubnetId: !Ref PrivateSubnet2
+
+  BastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${Input}-Bastion-SG
+      GroupName: !Sub ${Input}-Bastion-SG
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: 22
+        ToPort: 22
+        CidrIp: 0.0.0.0/0
+
+  BastionHost:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t2.micro
+      KeyName: !Ref BastionPrivateKey
+      NetworkInterfaces: 
+      - AssociatePublicIpAddress: "true"
+        DeviceIndex: "0"
+        SubnetId: !Ref PublicSubnet1
+        GroupSet:
+        - !GetAtt BastionSG.GroupId
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-Bastion
+
+  PrivateEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: t2.micro
+      KeyName: !Ref BastionPrivateKey
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds:
+      - !GetAtt BastionSG.GroupId
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-PrivateInstance
+
+  TGW:
+    Condition: PrimaryVPC
+    Type: "AWS::EC2::TransitGateway"
+    Properties:
+      Description: !Sub "TGW for ${Input}"
+      AutoAcceptSharedAttachments: "disable"
+      DefaultRouteTableAssociation: "enable"
+      DnsSupport: "enable"
+      VpnEcmpSupport: "enable"
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-TGW
+
+  TGWAttach:
+    Condition: PrimaryVPC
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      TransitGatewayId: !Ref TGW
+      SubnetIds:
+      - !Ref PrivateSubnet1
+      - !Ref PrivateSubnet2
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-TGWAttach
+
+  PrivateRouteToTGW:
+    DependsOn:
+    - TGW
+    - TGWAttach
+    Condition: PrimaryVPC
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRT
+      DestinationCidrBlock: !Ref CrossVPCCIDR
+      TransitGatewayId: !Ref TGW
+
+  PrimaryTGWAttach:
+    Condition: SecondaryVPC
+    Type: AWS::EC2::TransitGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      TransitGatewayId: !Ref PrimaryTGW
+      SubnetIds:
+      - !Ref PrivateSubnet1
+      - !Ref PrivateSubnet2
+      Tags:
+      - Key: Name
+        Value: !Sub ${Input}-TGWAttach
+
+  PrivateRouteToPrimaryTGW:
+    DependsOn:
+    - PrimaryTGWAttach
+    Condition: SecondaryVPC
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRT
+      DestinationCidrBlock: !Ref CrossVPCCIDR
+      TransitGatewayId: !Ref PrimaryTGW
+
+
+Outputs:
+  TGW:
+    Condition: PrimaryVPC
+    Description: TGW Name created by the primary VPC stack
+    Value: !GetAtt TGW.Id
